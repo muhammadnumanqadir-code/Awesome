@@ -1,0 +1,11 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+*.tsbuildinfo
+
+# Real filled ACORD samples used only to derive the blank templates in
+# public/acord-templates/ - these contain a third party's real PII and must
+# never be committed.
+/samples/
