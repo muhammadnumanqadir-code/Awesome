@@ -1,0 +1,541 @@
+Build a life insurance agency CRM demo on this project's Supabase backend. Do the work in this order and don't skip steps.
+
+STEP 1 - DATABASE. Apply the SQL in section A below as ONE migration, exactly as written. Do not edit, rename, simplify or split it. Keep Row Level Security enabled on every table, never add "using (true)" policies, never grant anything to anon. Hierarchy security (agents see only themselves and their downline, founder sees all) is enforced by these policies - never replace it with frontend filtering and never use the service role key in the browser.
+
+STEP 2 - DEMO USERS AND DATA. Create these 9 users with the exact ids and emails listed, all with password Demo1234! and email confirmed. Then run the SQL in section B (sample data), which needs those users to exist first.
+ f0000000-0000-0000-0000-000000000001 founder@agency.test
+ a0000000-0000-0000-0000-000000000001 manager.a@agency.test
+ b0000000-0000-0000-0000-000000000001 manager.b@agency.test
+ a1000000-0000-0000-0000-000000000001 agent.a1@agency.test
+ a1000000-0000-0000-0000-000000000002 agent.a2@agency.test
+ a1000000-0000-0000-0000-000000000003 agent.a3@agency.test
+ b1000000-0000-0000-0000-000000000001 agent.b1@agency.test
+ b1000000-0000-0000-0000-000000000002 agent.b2@agency.test
+ b1000000-0000-0000-0000-000000000003 agent.b3@agency.test
+(In section B, skip the first INSERT INTO auth.users statement if you already created the users.)
+
+STEP 3 - UI. Clean, modern, professional. Email/password login page, then:
+ - Dashboard: counts of my leads, clients, policies by status, total annual premium (AP), leads by disposition.
+ - Leads page: table with filters by disposition and stage, search, add lead, edit lead, change disposition, activity timeline per lead with "log call / text / email / note".
+ - Policies page: table with client, carrier, product, AP, status; add and edit a policy.
+ - Team page (managers/founder): agents I can see, with role, comp level and upline, and a tree view of the downline. Only founders can edit role / comp level / upline.
+ - A visible "logged in as <name> (<role>)" badge, so that switching between demo accounts clearly shows that each person sees different data.
+All data must come from Supabase queries as the logged-in user (no filtering by hand in the UI; RLS does the scoping). No delete buttons for leads or policies.
+
+===== SECTION A: SCHEMA + RLS =====
+-- 0001_schema.sql — enums, tables, indexes, closure + updated_at triggers.
+-- RLS is enabled on every table here, at creation time. Policies, grants and
+-- the hierarchy helper functions live in 0002_rls.sql; until that runs every
+-- table is deny-all.
+
+-- Hygiene: objects this role creates from now on are not exposed to anon.
+alter default privileges in schema public revoke all on tables    from anon;
+alter default privileges in schema public revoke all on sequences from anon;
+alter default privileges in schema public revoke all on functions from anon;
+
+-- ---------------------------------------------------------------- enums
+create type public.agent_role    as enum ('agent', 'manager', 'founder');
+create type public.agent_status  as enum ('active', 'inactive', 'terminated');
+create type public.lead_stage    as enum ('lead', 'client');
+create type public.disposition   as enum ('new', 'text_campaign', 'response', 'must_call',
+                                           'no_answer', 'not_interested', 'follow_up', 'sold');
+create type public.activity_type as enum ('call', 'text', 'email', 'underwriting', 'note');
+create type public.product_type  as enum ('fex', 'iul', 'term', 'adb');
+create type public.policy_status as enum ('pending_underwriting', 'active', 'lapsed',
+                                          'declined', 'cancelled');
+
+-- ---------------------------------------------------------------- tables
+create table public.agents (
+  id             uuid primary key references auth.users (id),
+  full_name      text not null,
+  email          text not null,
+  npn            text,
+  resident_state text,
+  comp_level     numeric(5,2),                       -- contract percentage, e.g. 90.00
+  role           public.agent_role   not null default 'agent',
+  status         public.agent_status not null default 'active',
+  upline_id      uuid references public.agents (id),
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now(),
+  constraint agents_not_own_upline check (upline_id is distinct from id)
+);
+
+-- Materialised hierarchy: one row per (ancestor, descendant) pair, including
+-- a depth-0 self row per agent. Maintained only by triggers on agents.
+create table public.agent_closure (
+  ancestor_id   uuid not null references public.agents (id) on delete cascade,
+  descendant_id uuid not null references public.agents (id) on delete cascade,
+  depth         int  not null check (depth >= 0),
+  primary key (ancestor_id, descendant_id)
+);
+
+create table public.lead_vendors (
+  id            uuid primary key default gen_random_uuid(),
+  name          text not null,
+  cost_per_lead numeric(10,2),
+  created_at    timestamptz not null default now()
+);
+
+-- Lead and client are one record, distinguished by stage.
+create table public.leads (
+  id              uuid primary key default gen_random_uuid(),
+  owner_agent_id  uuid not null references public.agents (id),
+  first_name      text,
+  last_name       text,
+  phone           text,
+  email           text,
+  date_of_birth   date,
+  state           text,
+  stage           public.lead_stage  not null default 'lead',
+  disposition     public.disposition not null default 'new',
+  lead_vendor_id  uuid references public.lead_vendors (id),
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+
+create table public.lead_activity (
+  id          uuid primary key default gen_random_uuid(),
+  lead_id     uuid not null references public.leads (id) on delete cascade,
+  agent_id    uuid not null references public.agents (id),
+  type        public.activity_type not null,
+  body        text,
+  occurred_at timestamptz not null default now()
+);
+
+create table public.carriers (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null,
+  created_at timestamptz not null default now()
+);
+
+create table public.products (
+  id         uuid primary key default gen_random_uuid(),
+  carrier_id uuid not null references public.carriers (id),
+  name       text not null,
+  type       public.product_type not null,
+  -- lets policies prove (product, carrier) belong together
+  constraint products_id_carrier_key unique (id, carrier_id)
+);
+
+create table public.policies (
+  id               uuid primary key default gen_random_uuid(),
+  client_id        uuid not null references public.leads (id),
+  writing_agent_id uuid not null references public.agents (id),
+  carrier_id       uuid not null references public.carriers (id),
+  product_id       uuid not null references public.products (id),
+  policy_number    text,
+  face_amount      numeric(12,2),
+  annual_premium   numeric(12,2),                    -- AP
+  monthly_premium  numeric(10,2),
+  status           public.policy_status not null default 'pending_underwriting',
+  effective_date   date,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now(),
+  constraint policies_product_matches_carrier
+    foreign key (product_id, carrier_id) references public.products (id, carrier_id)
+);
+
+-- GLOBAL per person, never per campaign (consent revocation must apply everywhere).
+create table public.opt_outs (
+  id          uuid primary key default gen_random_uuid(),
+  phone       text not null unique,
+  opted_out_at timestamptz not null default now(),
+  source      text
+);
+
+-- ---------------------------------------------------------------- RLS on, everywhere
+alter table public.agents        enable row level security;
+alter table public.agent_closure enable row level security;
+alter table public.lead_vendors  enable row level security;
+alter table public.leads         enable row level security;
+alter table public.lead_activity enable row level security;
+alter table public.carriers      enable row level security;
+alter table public.products      enable row level security;
+alter table public.policies      enable row level security;
+alter table public.opt_outs      enable row level security;
+
+-- ---------------------------------------------------------------- indexes (every FK)
+create index agents_upline_id_idx            on public.agents (upline_id);
+create index agent_closure_descendant_idx    on public.agent_closure (descendant_id);  -- ancestor_id is the PK prefix
+create index leads_owner_disposition_idx     on public.leads (owner_agent_id, disposition);
+create index leads_lead_vendor_id_idx        on public.leads (lead_vendor_id);
+create index lead_activity_lead_id_idx       on public.lead_activity (lead_id);
+create index lead_activity_agent_id_idx      on public.lead_activity (agent_id);
+create index products_carrier_id_idx         on public.products (carrier_id);
+create index policies_client_id_idx          on public.policies (client_id);
+create index policies_writing_agent_status_idx on public.policies (writing_agent_id, status);
+create index policies_carrier_id_idx         on public.policies (carrier_id);
+create index policies_product_carrier_idx    on public.policies (product_id, carrier_id);
+
+-- ---------------------------------------------------------------- updated_at
+create function public.set_updated_at() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  new.updated_at := now();
+  return new;
+end $$;
+
+create trigger agents_set_updated_at   before update on public.agents
+  for each row execute function public.set_updated_at();
+create trigger leads_set_updated_at    before update on public.leads
+  for each row execute function public.set_updated_at();
+create trigger policies_set_updated_at before update on public.policies
+  for each row execute function public.set_updated_at();
+
+-- ---------------------------------------------------------------- hierarchy triggers
+-- Cycle guard. Runs before the row is written, so a rejected change leaves
+-- both agents and agent_closure untouched.
+create function public.agents_reject_cycle() returns trigger
+language plpgsql security definer set search_path = '' as $$
+begin
+  if new.upline_id is null then
+    return new;
+  end if;
+
+  -- serialise hierarchy edits so two concurrent moves cannot jointly create a cycle
+  perform pg_advisory_xact_lock(hashtext('public.agent_closure'));
+
+  if new.upline_id = new.id
+     or exists (select 1 from public.agent_closure
+                 where ancestor_id = new.id and descendant_id = new.upline_id) then
+    raise exception 'agent hierarchy cycle: % cannot report to % (own descendant)',
+      new.id, new.upline_id
+      using errcode = 'check_violation', constraint = 'agents_no_hierarchy_cycle';
+  end if;
+  return new;
+end $$;
+
+create trigger agents_reject_cycle
+  before insert or update of upline_id on public.agents
+  for each row when (new.upline_id is not null)
+  execute function public.agents_reject_cycle();
+
+-- Rebuilds closure rows for the agent and its whole subtree.
+--   1. drop every link from the agent's OLD strict ancestors into its subtree
+--   2. link every ancestor of the NEW upline (incl. the upline) to every
+--      member of the subtree, depth = up.depth + sub.depth + 1
+create function public.agents_closure_maintain() returns trigger
+language plpgsql security definer set search_path = '' as $$
+begin
+  perform pg_advisory_xact_lock(hashtext('public.agent_closure'));
+
+  if tg_op = 'INSERT' then
+    insert into public.agent_closure (ancestor_id, descendant_id, depth)
+    values (new.id, new.id, 0);
+  else
+    delete from public.agent_closure ac
+     where ac.descendant_id in (select descendant_id from public.agent_closure
+                                 where ancestor_id = new.id)
+       and ac.ancestor_id   in (select ancestor_id from public.agent_closure
+                                 where descendant_id = new.id and ancestor_id <> new.id);
+  end if;
+
+  if new.upline_id is not null then
+    insert into public.agent_closure (ancestor_id, descendant_id, depth)
+    select up.ancestor_id, sub.descendant_id, up.depth + sub.depth + 1
+      from public.agent_closure up
+      join public.agent_closure sub on sub.ancestor_id = new.id
+     where up.descendant_id = new.upline_id;
+  end if;
+  return null;
+end $$;
+
+create trigger agents_closure_insert
+  after insert on public.agents
+  for each row execute function public.agents_closure_maintain();
+create trigger agents_closure_update
+  after update of upline_id on public.agents
+  for each row when (old.upline_id is distinct from new.upline_id)
+  execute function public.agents_closure_maintain();
+
+revoke all on function public.set_updated_at(), public.agents_reject_cycle(),
+  public.agents_closure_maintain() from public, anon, authenticated;
+-- 0002_rls.sql — hierarchy helpers, privilege grants, RLS policies.
+
+-- ---------------------------------------------------------------- helpers
+-- SECURITY DEFINER so they can read agents / agent_closure without recursing
+-- through those tables' own policies. STABLE, empty search_path, no anon.
+
+create function public.current_agent_id() returns uuid
+language sql stable security definer set search_path = '' as $$
+  select auth.uid()
+$$;
+
+create function public.is_founder() returns boolean
+language sql stable security definer set search_path = '' as $$
+  select exists (select 1 from public.agents
+                  where id = auth.uid() and role = 'founder')
+$$;
+
+-- True for any authenticated user that has an agents row. Keeps self-signed-up
+-- auth users (no agent record) away from shared reference data and opt_outs.
+create function public.is_agent() returns boolean
+language sql stable security definer set search_path = '' as $$
+  select exists (select 1 from public.agents where id = auth.uid())
+$$;
+
+create function public.can_see_agent(target uuid) returns boolean
+language sql stable security definer set search_path = '' as $$
+  select public.is_founder()
+      or target = public.current_agent_id()
+      or exists (select 1 from public.agent_closure
+                  where ancestor_id = public.current_agent_id()
+                    and descendant_id = target)
+$$;
+
+-- Guard for the founder-only columns on agents. SECURITY INVOKER on purpose:
+-- current_user is the real caller. Trusted server-side roles (migrations,
+-- service_role) pass; everyone else must be a founder.
+create function public.agents_guard_privileged_columns() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  if (new.role, new.comp_level, new.upline_id, new.status)
+       is distinct from (old.role, old.comp_level, old.upline_id, old.status)
+     and not public.is_founder()
+     and current_user not in ('postgres', 'supabase_admin', 'service_role') then
+    raise exception 'role, comp_level, upline_id and status can only be changed by a founder'
+      using errcode = 'insufficient_privilege';
+  end if;
+  return new;
+end $$;
+
+create trigger agents_guard_privileged_columns
+  before update on public.agents
+  for each row execute function public.agents_guard_privileged_columns();
+
+-- Nobody but signed-in users may call helpers or guard functions.
+revoke all on function public.current_agent_id(), public.is_founder(), public.is_agent(),
+  public.can_see_agent(uuid), public.agents_guard_privileged_columns()
+  from public, anon, authenticated;
+grant execute on function public.current_agent_id(), public.is_founder(), public.is_agent(),
+  public.can_see_agent(uuid) to authenticated;
+
+-- ---------------------------------------------------------------- grants
+-- Default Supabase privileges hand ALL on new tables to anon/authenticated.
+-- Strip that and grant only what the policies below can actually use.
+revoke all on table public.agents, public.agent_closure, public.lead_vendors,
+  public.leads, public.lead_activity, public.carriers, public.products,
+  public.policies, public.opt_outs from public, anon, authenticated;
+
+grant select on public.agents, public.agent_closure to authenticated;
+-- id and created_at are immutable to clients; role/comp_level/upline_id/status
+-- are grantable here and gated to founders by the trigger above.
+grant update (full_name, email, npn, resident_state, comp_level, role, status,
+              upline_id, updated_at) on public.agents to authenticated;
+
+grant select, insert, update on public.leads    to authenticated;
+grant select, insert         on public.lead_activity to authenticated;
+grant select, insert, update on public.policies to authenticated;
+grant select, insert, update, delete on public.carriers, public.products,
+  public.lead_vendors to authenticated;
+grant select, insert         on public.opt_outs to authenticated;
+
+-- ---------------------------------------------------------------- policies
+-- agents
+create policy agents_select on public.agents for select to authenticated
+  using (public.can_see_agent(id));
+create policy agents_update on public.agents for update to authenticated
+  using      (id = public.current_agent_id() or public.is_founder())
+  with check (id = public.current_agent_id() or public.is_founder());
+
+-- agent_closure: read-only for clients
+create policy agent_closure_select on public.agent_closure for select to authenticated
+  using (public.can_see_agent(descendant_id));
+
+-- leads
+create policy leads_select on public.leads for select to authenticated
+  using (public.can_see_agent(owner_agent_id));
+create policy leads_insert on public.leads for insert to authenticated
+  with check (public.can_see_agent(owner_agent_id));
+create policy leads_update on public.leads for update to authenticated
+  using      (public.can_see_agent(owner_agent_id))
+  with check (public.can_see_agent(owner_agent_id));
+
+-- lead_activity. Inserts must also target a lead the caller can see: FK checks
+-- bypass RLS, so without this an agent could attach rows to (and probe the
+-- existence of) another branch's leads.
+create policy lead_activity_select on public.lead_activity for select to authenticated
+  using (public.can_see_agent(agent_id));
+create policy lead_activity_insert on public.lead_activity for insert to authenticated
+  with check (public.can_see_agent(agent_id)
+              and exists (select 1 from public.leads l where l.id = lead_id));
+
+-- policies (same reasoning for client_id; the leads subquery runs under the caller's RLS)
+create policy policies_select on public.policies for select to authenticated
+  using (public.can_see_agent(writing_agent_id));
+create policy policies_insert on public.policies for insert to authenticated
+  with check (public.can_see_agent(writing_agent_id)
+              and exists (select 1 from public.leads l where l.id = client_id));
+create policy policies_update on public.policies for update to authenticated
+  using      (public.can_see_agent(writing_agent_id))
+  with check (public.can_see_agent(writing_agent_id)
+              and exists (select 1 from public.leads l where l.id = client_id));
+
+-- carriers / products / lead_vendors: agents read, founders write
+create policy carriers_select on public.carriers for select to authenticated
+  using (public.is_agent());
+create policy carriers_insert on public.carriers for insert to authenticated
+  with check (public.is_founder());
+create policy carriers_update on public.carriers for update to authenticated
+  using (public.is_founder()) with check (public.is_founder());
+create policy carriers_delete on public.carriers for delete to authenticated
+  using (public.is_founder());
+
+create policy products_select on public.products for select to authenticated
+  using (public.is_agent());
+create policy products_insert on public.products for insert to authenticated
+  with check (public.is_founder());
+create policy products_update on public.products for update to authenticated
+  using (public.is_founder()) with check (public.is_founder());
+create policy products_delete on public.products for delete to authenticated
+  using (public.is_founder());
+
+create policy lead_vendors_select on public.lead_vendors for select to authenticated
+  using (public.is_agent());
+create policy lead_vendors_insert on public.lead_vendors for insert to authenticated
+  with check (public.is_founder());
+create policy lead_vendors_update on public.lead_vendors for update to authenticated
+  using (public.is_founder()) with check (public.is_founder());
+create policy lead_vendors_delete on public.lead_vendors for delete to authenticated
+  using (public.is_founder());
+
+-- opt_outs: append-only for agents
+create policy opt_outs_select on public.opt_outs for select to authenticated
+  using (public.is_agent());
+create policy opt_outs_insert on public.opt_outs for insert to authenticated
+  with check (public.is_agent());
+
+===== SECTION B: SAMPLE DATA =====
+-- Seed: 1 founder, 2 managers, 3 agents per manager, 4 carriers x 2 products,
+-- 2 lead vendors, 46 leads, activity, 9 policies, a few opt-outs.
+-- Fixed UUIDs so tests and the frontend can refer to people by id.
+--   founder f0000000-…-0001
+--   manager A a0000000-…-0001   agents A1..A3 a1000000-…-0001..0003
+--   manager B b0000000-…-0001   agents B1..B3 b1000000-…-0001..0003
+
+insert into auth.users (instance_id, id, aud, role, email, email_confirmed_at)
+select '00000000-0000-0000-0000-000000000000', id, 'authenticated', 'authenticated', email, now()
+from (values
+  ('f0000000-0000-0000-0000-000000000001'::uuid, 'founder@agency.test'),
+  ('a0000000-0000-0000-0000-000000000001', 'manager.a@agency.test'),
+  ('b0000000-0000-0000-0000-000000000001', 'manager.b@agency.test'),
+  ('a1000000-0000-0000-0000-000000000001', 'agent.a1@agency.test'),
+  ('a1000000-0000-0000-0000-000000000002', 'agent.a2@agency.test'),
+  ('a1000000-0000-0000-0000-000000000003', 'agent.a3@agency.test'),
+  ('b1000000-0000-0000-0000-000000000001', 'agent.b1@agency.test'),
+  ('b1000000-0000-0000-0000-000000000002', 'agent.b2@agency.test'),
+  ('b1000000-0000-0000-0000-000000000003', 'agent.b3@agency.test')
+) as u(id, email);
+
+-- parents first, so each agent's upline already has its closure rows
+insert into public.agents (id, full_name, email, npn, resident_state, comp_level, role, upline_id) values
+  ('f0000000-0000-0000-0000-000000000001', 'Frank Founder', 'founder@agency.test',   '1000001', 'TX', 130.00, 'founder', null);
+insert into public.agents (id, full_name, email, npn, resident_state, comp_level, role, upline_id) values
+  ('a0000000-0000-0000-0000-000000000001', 'Maya Manager-A', 'manager.a@agency.test', '2000001', 'TX', 120.00, 'manager', 'f0000000-0000-0000-0000-000000000001'),
+  ('b0000000-0000-0000-0000-000000000001', 'Ben Manager-B',  'manager.b@agency.test', '2000002', 'FL', 120.00, 'manager', 'f0000000-0000-0000-0000-000000000001');
+insert into public.agents (id, full_name, email, npn, resident_state, comp_level, role, upline_id) values
+  ('a1000000-0000-0000-0000-000000000001', 'Alice Agent-A1', 'agent.a1@agency.test', '3000001', 'TX', 100.00, 'agent', 'a0000000-0000-0000-0000-000000000001'),
+  ('a1000000-0000-0000-0000-000000000002', 'Aaron Agent-A2', 'agent.a2@agency.test', '3000002', 'OK', 90.00,  'agent', 'a0000000-0000-0000-0000-000000000001'),
+  ('a1000000-0000-0000-0000-000000000003', 'Amy Agent-A3',   'agent.a3@agency.test', '3000003', 'TX', 90.00,  'agent', 'a0000000-0000-0000-0000-000000000001'),
+  ('b1000000-0000-0000-0000-000000000001', 'Bella Agent-B1', 'agent.b1@agency.test', '3000004', 'FL', 100.00, 'agent', 'b0000000-0000-0000-0000-000000000001'),
+  ('b1000000-0000-0000-0000-000000000002', 'Blake Agent-B2', 'agent.b2@agency.test', '3000005', 'GA', 90.00,  'agent', 'b0000000-0000-0000-0000-000000000001'),
+  ('b1000000-0000-0000-0000-000000000003', 'Bria Agent-B3',  'agent.b3@agency.test', '3000006', 'FL', 80.00,  'agent', 'b0000000-0000-0000-0000-000000000001');
+
+-- carriers and products
+insert into public.carriers (id, name) values
+  ('c0000000-0000-0000-0000-000000000001', 'Americo'),
+  ('c0000000-0000-0000-0000-000000000002', 'Mutual of Omaha'),
+  ('c0000000-0000-0000-0000-000000000003', 'Corebridge'),
+  ('c0000000-0000-0000-0000-000000000004', 'Foresters');
+
+insert into public.products (id, carrier_id, name, type) values
+  ('d0000000-0000-0000-0000-000000000011', 'c0000000-0000-0000-0000-000000000001', 'Eagle Premier FEX',   'fex'),
+  ('d0000000-0000-0000-0000-000000000012', 'c0000000-0000-0000-0000-000000000001', 'Americo Term',        'term'),
+  ('d0000000-0000-0000-0000-000000000021', 'c0000000-0000-0000-0000-000000000002', 'Living Promise FEX',  'fex'),
+  ('d0000000-0000-0000-0000-000000000022', 'c0000000-0000-0000-0000-000000000002', 'Income Advantage IUL','iul'),
+  ('d0000000-0000-0000-0000-000000000031', 'c0000000-0000-0000-0000-000000000003', 'Max Accumulator IUL', 'iul'),
+  ('d0000000-0000-0000-0000-000000000032', 'c0000000-0000-0000-0000-000000000003', 'SI Term',             'term'),
+  ('d0000000-0000-0000-0000-000000000041', 'c0000000-0000-0000-0000-000000000004', 'Advantage Plus FEX',  'fex'),
+  ('d0000000-0000-0000-0000-000000000042', 'c0000000-0000-0000-0000-000000000004', 'Accidental Death Rider','adb');
+
+insert into public.lead_vendors (id, name, cost_per_lead) values
+  ('e0000000-0000-0000-0000-000000000001', 'LeadBridge Direct', 12.50),
+  ('e0000000-0000-0000-0000-000000000002', 'Prime Aged Leads',   7.25);
+
+-- leads: 7 for each of the six agents + 2 for each manager = 46.
+-- Dispositions rotate through all eight values; 'sold' leads become clients.
+with owners(n, agent_id) as (values
+  (1, 'a1000000-0000-0000-0000-000000000001'::uuid), (2, 'a1000000-0000-0000-0000-000000000002'),
+  (3, 'a1000000-0000-0000-0000-000000000003'),       (4, 'b1000000-0000-0000-0000-000000000001'),
+  (5, 'b1000000-0000-0000-0000-000000000002'),       (6, 'b1000000-0000-0000-0000-000000000003')),
+disps(i, d) as (values
+  (0,'new'::public.disposition),(1,'text_campaign'),(2,'response'),(3,'must_call'),
+  (4,'no_answer'),(5,'not_interested'),(6,'follow_up'),(7,'sold')),
+rows_ as (
+  select o.n as o_n, k, o.agent_id, ds.d
+  from owners o
+  cross join generate_series(1, 7) k
+  join disps ds on ds.i = (o.n + k) % 8
+  union all
+  select 10 + m.n, k, m.agent_id, ds.d
+  from (values (1, 'a0000000-0000-0000-0000-000000000001'::uuid),
+               (2, 'b0000000-0000-0000-0000-000000000001')) m(n, agent_id)
+  cross join generate_series(1, 2) k
+  join disps ds on ds.i = (m.n * 3 + k) % 7          -- never 'sold' for managers
+)
+insert into public.leads (id, owner_agent_id, first_name, last_name, phone, email, date_of_birth,
+                          state, stage, disposition, lead_vendor_id)
+select md5('lead-' || o_n || '-' || k)::uuid,
+       agent_id,
+       (array['James','Mary','Robert','Patricia','John','Jennifer','Michael','Linda'])[1 + (o_n + k) % 8],
+       (array['Smith','Johnson','Williams','Brown','Jones','Garcia','Miller','Davis'])[1 + (o_n * 3 + k) % 8],
+       '+1555' || lpad((o_n * 100 + k)::text, 7, '0'),
+       'lead' || o_n || '_' || k || '@example.test',
+       date '1955-01-01' + ((o_n * 397 + k * 211) % 9000),
+       (array['TX','FL','GA','OK','OH','NC'])[1 + (o_n + k) % 6],
+       case when d = 'sold' then 'client'::public.lead_stage else 'lead'::public.lead_stage end,
+       d,
+       case when k % 2 = 0 then 'e0000000-0000-0000-0000-000000000001'::uuid
+            else 'e0000000-0000-0000-0000-000000000002'::uuid end
+from rows_;
+
+-- activity: a call on every lead, underwriting on clients, one manager note on a downline lead
+insert into public.lead_activity (lead_id, agent_id, type, body, occurred_at)
+select id, owner_agent_id, 'call', 'Initial outreach call', created_at + interval '1 hour'
+from public.leads;
+insert into public.lead_activity (lead_id, agent_id, type, body, occurred_at)
+select id, owner_agent_id, 'underwriting', 'Application submitted', created_at + interval '2 days'
+from public.leads where stage = 'client';
+insert into public.lead_activity (lead_id, agent_id, type, body)
+select l.id, 'a0000000-0000-0000-0000-000000000001', 'note', 'Manager review: push for follow-up'
+from public.leads l
+where l.owner_agent_id = 'a1000000-0000-0000-0000-000000000002' and l.disposition = 'follow_up'
+limit 1;
+
+-- policies: each client (sold lead) gets one; three get a second, statuses vary
+with clients as (
+  select l.id, l.owner_agent_id, row_number() over (order by l.id) as rn from public.leads l where l.stage = 'client'
+),
+plan(rn, extra, status, product_id, carrier_id, ap) as (values
+  (1, 0, 'active'::public.policy_status,               'd0000000-0000-0000-0000-000000000011'::uuid, 'c0000000-0000-0000-0000-000000000001'::uuid, 1800.00),
+  (2, 0, 'pending_underwriting',                       'd0000000-0000-0000-0000-000000000022', 'c0000000-0000-0000-0000-000000000002', 4200.00),
+  (3, 0, 'active',                                     'd0000000-0000-0000-0000-000000000031', 'c0000000-0000-0000-0000-000000000003', 6000.00),
+  (4, 0, 'declined',                                   'd0000000-0000-0000-0000-000000000041', 'c0000000-0000-0000-0000-000000000004', 1500.00),
+  (5, 0, 'lapsed',                                     'd0000000-0000-0000-0000-000000000021', 'c0000000-0000-0000-0000-000000000002', 2400.00),
+  (6, 0, 'cancelled',                                  'd0000000-0000-0000-0000-000000000012', 'c0000000-0000-0000-0000-000000000001',  900.00),
+  (1, 1, 'pending_underwriting',                       'd0000000-0000-0000-0000-000000000032', 'c0000000-0000-0000-0000-000000000003',  720.00),
+  (3, 1, 'active',                                     'd0000000-0000-0000-0000-000000000042', 'c0000000-0000-0000-0000-000000000004',  240.00),
+  (5, 1, 'pending_underwriting',                       'd0000000-0000-0000-0000-000000000011', 'c0000000-0000-0000-0000-000000000001', 1200.00)
+)
+insert into public.policies (client_id, writing_agent_id, carrier_id, product_id, policy_number,
+                             face_amount, annual_premium, monthly_premium, status, effective_date)
+select c.id, c.owner_agent_id, p.carrier_id, p.product_id,
+       'POL-' || lpad((p.rn * 10 + p.extra)::text, 5, '0'),
+       p.ap * 12, p.ap, round(p.ap / 12, 2), p.status,
+       case when p.status in ('active', 'lapsed', 'cancelled') then date '2026-01-15' + p.rn * 9 end
+from clients c join plan p using (rn);
+
+insert into public.opt_outs (phone, source) values
+  ('+15550009001', 'text reply STOP'),
+  ('+15550009002', 'phone request'),
+  ('+15550009003', 'carrier DNC list');
