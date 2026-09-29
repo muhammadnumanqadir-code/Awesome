@@ -1,0 +1,223 @@
+
+1. Structural guarantees
+  PASS  9 public tables exist (9)   -- expected 9, got 9
+  PASS  every public table has RLS enabled (0)   -- expected 0, got 0
+  PASS  no policy uses USING (true) / WITH CHECK (true) (0)   -- expected 0, got 0
+  PASS  every policy has an expression (0)   -- expected 0, got 0
+  PASS  every policy targets authenticated only (0)   -- expected 0, got 0
+  PASS  every policy scopes through a hierarchy helper (0)   -- expected 0, got 0
+  PASS  helpers are SECURITY DEFINER + STABLE + search_path="" (4)   -- expected 4, got 4
+  PASS  anon has EXECUTE on no function in public (0)   -- expected 0, got 0
+  PASS  trigger/definer functions are not callable by authenticated (0)   -- expected 0, got 0
+  PASS  anon holds no privilege on any table
+  PASS  service_role is not referenced by any policy (0)   -- expected 0, got 0
+  PASS  every foreign key has a supporting index (0)   -- expected 0, got 0
+  PASS  leads(owner_agent_id, disposition) index exists (1)   -- expected 1, got 1
+  PASS  policies(writing_agent_id, status) index exists (1)   -- expected 1, got 1
+  PASS  every table with updated_at has an updated_at trigger (0)   -- expected 0, got 0
+
+2. Seed data and closure integrity
+  PASS  9 agents (9)   -- expected 9, got 9
+  PASS  46 leads (46)   -- expected 46, got 46
+  PASS  9 policies (9)   -- expected 9, got 9
+  PASS  4 carriers (4)   -- expected 4, got 4
+  PASS  8 products (8)   -- expected 8, got 8
+  PASS  2 lead vendors (2)   -- expected 2, got 2
+  PASS  every agent has a depth-0 self row (9)   -- expected 9, got 9
+  PASS  closure has 9 self + 8 depth-1 + 6 depth-2 rows (23)   -- expected 23, got 23
+  PASS  closure matches recursive-CTE ground truth (0)   -- expected 0, got 0
+  PASS  all six agents hold leads across varied dispositions (6)   -- expected 6, got 6
+  PASS  seed has every lead disposition
+  PASS  seed has several policy statuses
+
+3. Founder sees everything
+  PASS  founder sees all agents (9)   -- expected 9, got 9
+  PASS  founder sees all leads (46)   -- expected 46, got 46
+  PASS  founder sees all lead_activity (53)   -- expected 53, got 53
+  PASS  founder sees all policies (9)   -- expected 9, got 9
+  PASS  founder sees all closure rows (23)   -- expected 23, got 23
+  PASS  is_founder() true for founder
+
+4. Manager A: own branch only
+  PASS  agents: manager A sees exactly self + 3 agents (4)   -- expected 4, got 4
+  PASS  agents: ... which are the branch-A ids (4)   -- expected 4, got 4
+  PASS  agents: no manager-B branch rows (0)   -- expected 0, got 0
+  PASS  agents: founder row not visible (0)   -- expected 0, got 0
+  PASS  leads: manager A sees the whole branch-A book (23)   -- expected 23, got 23
+  PASS  leads: branch-A book is non-trivial
+  PASS  leads: none owned outside branch A (0)   -- expected 0, got 0
+  PASS  leads: none owned by branch B (0)   -- expected 0, got 0
+  PASS  lead_activity: manager A sees the whole branch-A activity (27)   -- expected 27, got 27
+  PASS  lead_activity: none by anyone outside branch A (0)   -- expected 0, got 0
+  PASS  lead_activity: none on branch-B leads (0)   -- expected 0, got 0
+  PASS  policies: manager A sees the whole branch-A policies (4)   -- expected 4, got 4
+  PASS  policies: branch-A policies non-empty
+  PASS  policies: none written outside branch A (0)   -- expected 0, got 0
+  PASS  policies: none written by branch B (0)   -- expected 0, got 0
+  PASS  agent_closure: no rows for branch-B descendants (0)   -- expected 0, got 0
+  PASS  can_see_agent(B1) is false (0)   -- expected 0, got 0
+  PASS  can_see_agent(A3) is true (1)   -- expected 1, got 1
+
+5. Leaf agent A1: own rows only
+  PASS  agents: sees only self (1)   -- expected 1, got 1
+  PASS  agents: and it is A1 (1)   -- expected 1, got 1
+  PASS  leads: sees only own leads (7)   -- expected 7, got 7
+  PASS  leads: own book non-empty
+  PASS  leads: none owned by siblings/manager (0)   -- expected 0, got 0
+  PASS  lead_activity: sees only own activity (8)   -- expected 8, got 8
+  PASS  lead_activity: none by others (0)   -- expected 0, got 0
+  PASS  policies: sees only own policies (1)   -- expected 1, got 1
+  PASS  policies: own policies non-empty
+  PASS  policies: none written by others (0)   -- expected 0, got 0
+  PASS  agent_closure: only rows that end at A1 (0)   -- expected 0, got 0
+  PASS  can_see_agent(sibling A2) is false (0)   -- expected 0, got 0
+  PASS  can_see_agent(own manager) is false (0)   -- expected 0, got 0
+  PASS  B3 sees only self (1)   -- expected 1, got 1
+  PASS  B3 sees nothing owned by branch A (0)   -- expected 0, got 0
+
+6. anon role has zero access
+  PASS  anon reads agent_closure -> permission denied [42501]
+  PASS  anon reads agents -> permission denied [42501]
+  PASS  anon reads carriers -> permission denied [42501]
+  PASS  anon reads lead_activity -> permission denied [42501]
+  PASS  anon reads lead_vendors -> permission denied [42501]
+  PASS  anon reads leads -> permission denied [42501]
+  PASS  anon reads opt_outs -> permission denied [42501]
+  PASS  anon reads policies -> permission denied [42501]
+  PASS  anon reads products -> permission denied [42501]
+  PASS  anon cannot INSERT into leads [42501]   -- expected 42501, got 42501: permission denied for table leads
+  PASS  anon cannot INSERT into opt_outs [42501]   -- expected 42501, got 42501: permission denied for table opt_outs
+  PASS  anon cannot call can_see_agent() [42501]   -- expected 42501, got 42501: permission denied for function can_see_agent
+  PASS  anon cannot call is_founder() [42501]   -- expected 42501, got 42501: permission denied for function is_founder
+
+7. Agents cannot escalate their own privileges
+  PASS  agent can update own full_name (1 row)   -- expected 1 rows, got 1
+  PASS  updated_at trigger advanced updated_at
+  PASS  agent cannot UPDATE own comp_level [42501]   -- expected 42501, got 42501: role, comp_level, upline_id and status can only be changed by a founder
+  PASS  agent cannot UPDATE own role [42501]   -- expected 42501, got 42501: role, comp_level, upline_id and status can only be changed by a founder
+  PASS  agent cannot UPDATE own upline_id [42501]   -- expected 42501, got 42501: role, comp_level, upline_id and status can only be changed by a founder
+  PASS  agent cannot UPDATE own status [42501]   -- expected 42501, got 42501: role, comp_level, upline_id and status can only be changed by a founder
+  PASS  agent cannot smuggle a forbidden column into an otherwise legal UPDATE [42501]   -- expected 42501, got 42501: role, comp_level, upline_id and status can only be changed by a founder
+  PASS  agent cannot change agents.id (no column grant) [42501]   -- expected 42501, got 42501: permission denied for table agents
+  PASS  agent cannot UPDATE a sibling (RLS filters the row) (0 rows)   -- expected 0 rows, got 0
+  PASS  agent cannot INSERT agents [42501]   -- expected 42501, got 42501: permission denied for table agents
+  PASS  agent cannot DELETE agents [42501]   -- expected 42501, got 42501: permission denied for table agents
+  PASS  manager cannot change a downline agent (RLS filters the row) (0 rows)   -- expected 0 rows, got 0
+  PASS  manager cannot UPDATE own comp_level [42501]   -- expected 42501, got 42501: role, comp_level, upline_id and status can only be changed by a founder
+  PASS  manager cannot UPDATE own role to founder [42501]   -- expected 42501, got 42501: role, comp_level, upline_id and status can only be changed by a founder
+  PASS  A1 comp_level, role, upline_id, status unchanged after all attempts (1)   -- expected 1, got 1
+  PASS  A2 untouched by A1 and manager attempts (1)   -- expected 1, got 1
+  PASS  founder CAN update comp_level (1 row)   -- expected 1 rows, got 1
+  PASS  founder CAN update role (1 row)   -- expected 1 rows, got 1
+  PASS  founder CAN update upline_id (1 row)   -- expected 1 rows, got 1
+  PASS  founder CAN update status (1 row)   -- expected 1 rows, got 1
+  PASS  founder changes persisted (1)   -- expected 1, got 1
+  PASS  closure still matches ground truth after founder edits (0)   -- expected 0, got 0
+
+8. Closure maintenance: moves rebuild the whole subtree
+  PASS  new agent X: 4 closure rows (self, A1, mgrA, founder) (4)   -- expected 4, got 4
+  PASS  depth founder->Y is 4 (1)   -- expected 1, got 1
+  PASS  closure matches ground truth after inserts (0)   -- expected 0, got 0
+  PASS  founder moves manager A under manager B (1 row)   -- expected 1 rows, got 1
+  PASS  closure matches ground truth after move (0)   -- expected 0, got 0
+  PASS  mgrA now at depth 1 under mgrB (1)   -- expected 1, got 1
+  PASS  founder->mgrA re-parented to depth 2 (1)   -- expected 1, got 1
+  PASS  mgrB->Y depth 4 (deep descendant followed the move) (1)   -- expected 1, got 1
+  PASS  founder->Y depth 5 (1)   -- expected 1, got 1
+  PASS  subtree-internal rows untouched: mgrA->Y depth 3 (1)   -- expected 1, got 1
+  PASS  Y has exactly 6 ancestors incl. self (Y,X,A1,mgrA,mgrB,founder) (6)   -- expected 6, got 6
+  PASS  no stale founder->mgrA depth-1 link (0)   -- expected 0, got 0
+  PASS  mgrB does not gain unrelated rows: B branch has no rows for A2 at depth 1 (0)   -- expected 0, got 0
+  PASS  mgrB now sees B branch + A branch + X + Y = 10 agents (10)   -- expected 10, got 10
+  PASS  mgrA now sees itself, A1..A3, X, Y = 6 agents (6)   -- expected 6, got 6
+  PASS  mgrA still sees nothing of B1..B3 (0)   -- expected 0, got 0
+  PASS  founder detaches A1 (upline_id = NULL) (1 row)   -- expected 1 rows, got 1
+  PASS  closure matches ground truth after detach (0)   -- expected 0, got 0
+  PASS  detached subtree has no rows from old ancestors (0)   -- expected 0, got 0
+  PASS  A1 subtree keeps internal rows (A1->Y depth 2) (1)   -- expected 1, got 1
+  PASS  founder re-attaches A1 under A2 (1 row)   -- expected 1 rows, got 1
+  PASS  closure matches ground truth after re-attach (0)   -- expected 0, got 0
+  PASS  founder->Y depth 7 (founder>mgrB>mgrA>A2>A1>X>Y) (1)   -- expected 1, got 1
+  PASS  closure matches ground truth after no-op update (0)   -- expected 0, got 0
+
+9. Cycles are rejected
+  PASS  upline = own direct child rejected [23514]   -- expected 23514, got 23514: agent hierarchy cycle: a1000000-0000-0000-0000-000000000002 cannot report to a1000000-0000-0000-0000-000000000001 (own descendant)
+  PASS  upline = own deep descendant rejected (mgrA under Y) [23514]   -- expected 23514, got 23514: agent hierarchy cycle: a0000000-0000-0000-0000-000000000001 cannot report to 99000000-0000-0000-0000-000000000002 (own descendant)
+  PASS  founder cannot be placed under own descendant [23514]   -- expected 23514, got 23514: agent hierarchy cycle: f0000000-0000-0000-0000-000000000001 cannot report to b0000000-0000-0000-0000-000000000001 (own descendant)
+  PASS  upline = self rejected [23514]   -- expected 23514, got 23514: agent hierarchy cycle: 99000000-0000-0000-0000-000000000001 cannot report to 99000000-0000-0000-0000-000000000001 (own descendant)
+  PASS  cycle rejected even for a trusted (non-RLS) role [23514]   -- expected 23514, got 23514: agent hierarchy cycle: b0000000-0000-0000-0000-000000000001 cannot report to 99000000-0000-0000-0000-000000000002 (own descendant)
+  PASS  agent_closure row count unchanged by rejected moves (41)   -- expected 41, got 41
+  PASS  closure matches ground truth after rejected moves (0)   -- expected 0, got 0
+  PASS  rejected moves left upline_id unchanged (3)   -- expected 3, got 3
+
+10. Write policies
+  PASS  A1 inserts a lead for self (1 row)   -- expected 1 rows, got 1
+  PASS  A1 cannot insert a lead owned by sibling A2 [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "leads"
+  PASS  A1 updates own lead disposition (1 row)   -- expected 1 rows, got 1
+  PASS  A1 cannot update sibling lead (row invisible) (0 rows)   -- expected 0 rows, got 0
+  PASS  A1 cannot hand own lead to sibling A2 [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "leads"
+  PASS  A1 cannot DELETE leads (no grant) [42501]   -- expected 42501, got 42501: permission denied for table leads
+  PASS  manager A inserts a lead for downline agent A3 (1 row)   -- expected 1 rows, got 1
+  PASS  manager A cannot insert a lead for branch-B agent [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "leads"
+  PASS  manager A updates a downline lead (1 row)   -- expected 1 rows, got 1
+  PASS  manager A cannot move a downline lead into branch B [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "leads"
+  PASS  A1 logs activity on own lead (1 row)   -- expected 1 rows, got 1
+  PASS  A1 cannot log activity on sibling lead [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "lead_activity"
+  PASS  A1 cannot forge activity as sibling A2 [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "lead_activity"
+  PASS  activity is not updatable [42501]   -- expected 42501, got 42501: permission denied for table lead_activity
+  PASS  manager A logs activity as downline A1 on A1 lead (1 row)   -- expected 1 rows, got 1
+  PASS  A1 writes a policy for own client (1 row)   -- expected 1 rows, got 1
+  PASS  A1 cannot write a policy for sibling client [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "policies"
+  PASS  A1 cannot write a policy as sibling A2 [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "policies"
+  PASS  policy product must belong to policy carrier [23503]   -- expected 23503, got 23503: insert or update on table "policies" violates foreign key constraint "policies_product_matches_carrier"
+  PASS  A1 updates own policy status (1 row)   -- expected 1 rows, got 1
+  PASS  A1 cannot update sibling policy (row invisible) (0 rows)   -- expected 0 rows, got 0
+  PASS  A1 cannot re-point own policy at a sibling client [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "policies"
+  PASS  A1 cannot DELETE policies [42501]   -- expected 42501, got 42501: permission denied for table policies
+  PASS  agent reads all carriers (4)   -- expected 4, got 4
+  PASS  agent reads all products (8)   -- expected 8, got 8
+  PASS  agent reads all lead_vendors (2)   -- expected 2, got 2
+  PASS  agent cannot insert carrier [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "carriers"
+  PASS  agent cannot insert product [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "products"
+  PASS  agent cannot insert lead vendor [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "lead_vendors"
+  PASS  agent cannot update carriers (rows filtered) (0 rows)   -- expected 0 rows, got 0
+  PASS  agent cannot delete products (rows filtered) (0 rows)   -- expected 0 rows, got 0
+  PASS  agent cannot update lead vendors (rows filtered) (0 rows)   -- expected 0 rows, got 0
+  PASS  manager cannot insert carrier [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "carriers"
+  PASS  founder inserts a carrier (1 row)   -- expected 1 rows, got 1
+  PASS  founder updates a carrier (1 row)   -- expected 1 rows, got 1
+  PASS  founder inserts a product (1 row)   -- expected 1 rows, got 1
+  PASS  founder inserts a lead vendor (1 row)   -- expected 1 rows, got 1
+  PASS  founder deletes a lead vendor (1 row)   -- expected 1 rows, got 1
+  PASS  founder cannot INSERT into agent_closure [42501]   -- expected 42501, got 42501: permission denied for table agent_closure
+  PASS  founder cannot UPDATE agent_closure [42501]   -- expected 42501, got 42501: permission denied for table agent_closure
+  PASS  founder cannot DELETE agent_closure [42501]   -- expected 42501, got 42501: permission denied for table agent_closure
+  PASS  founder cannot INSERT agents (auth users are provisioned server-side) [42501]   -- expected 42501, got 42501: permission denied for table agents
+
+11. opt_outs: global, append-only
+  PASS  agent sees every seeded opt-out (global, not per agent) (3)   -- expected 3, got 3
+  PASS  agent records an opt-out (1 row)   -- expected 1 rows, got 1
+  PASS  same phone cannot be opted out twice (global unique) [23505]   -- expected 23505, got 23505: duplicate key value violates unique constraint "opt_outs_phone_key"
+  PASS  agent cannot UPDATE opt_outs [42501]   -- expected 42501, got 42501: permission denied for table opt_outs
+  PASS  agent cannot DELETE opt_outs [42501]   -- expected 42501, got 42501: permission denied for table opt_outs
+  PASS  another branch sees the opt-out immediately (1)   -- expected 1, got 1
+  PASS  same phone from another branch also rejected [23505]   -- expected 23505, got 23505: duplicate key value violates unique constraint "opt_outs_phone_key"
+  PASS  even a founder cannot DELETE opt_outs [42501]   -- expected 42501, got 42501: permission denied for table opt_outs
+  PASS  even a founder cannot UPDATE opt_outs [42501]   -- expected 42501, got 42501: permission denied for table opt_outs
+
+12. Signed-in user with no agents row
+  PASS  unprovisioned user sees 0 rows of agents (0)   -- expected 0, got 0
+  PASS  unprovisioned user sees 0 rows of agent_closure (0)   -- expected 0, got 0
+  PASS  unprovisioned user sees 0 rows of leads (0)   -- expected 0, got 0
+  PASS  unprovisioned user sees 0 rows of lead_activity (0)   -- expected 0, got 0
+  PASS  unprovisioned user sees 0 rows of policies (0)   -- expected 0, got 0
+  PASS  unprovisioned user sees 0 rows of carriers (0)   -- expected 0, got 0
+  PASS  unprovisioned user sees 0 rows of products (0)   -- expected 0, got 0
+  PASS  unprovisioned user sees 0 rows of lead_vendors (0)   -- expected 0, got 0
+  PASS  unprovisioned user sees 0 rows of opt_outs (0)   -- expected 0, got 0
+  PASS  unprovisioned user cannot record an opt-out [42501]   -- expected 42501, got 42501: new row violates row-level security policy for table "opt_outs"
+  PASS  unprovisioned user cannot create a lead for themselves (FK to agents) [23503]   -- expected 23503, got 23503: insert or update on table "leads" violates foreign key constraint "leads_owner_agent_id_fkey"
+
+Result
+  195 passed, 0 failed
+
